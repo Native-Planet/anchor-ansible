@@ -1,0 +1,143 @@
+---
+- hosts: controller
+  become: yes
+  gather_facts: true
+  tasks:
+
+  - name: Get local non-root user
+    set_fact:
+      remote_user: "{{ ansible_env.SUDO_USER or ansible_user_id }}"
+
+  - name: Allow 80/TCP
+    ansible.builtin.iptables:
+      chain: INPUT
+      protocol: tcp
+      destination_port: '80'
+      ctstate: NEW
+      syn: match
+      jump: ACCEPT
+
+  - name: Allow 443/TCP
+    ansible.builtin.iptables:
+      chain: INPUT
+      protocol: tcp
+      destination_port: '443'
+      ctstate: NEW
+      syn: match
+      jump: ACCEPT
+
+  - name: Allow 8080/TCP
+    ansible.builtin.iptables:
+      chain: INPUT
+      protocol: tcp
+      destination_port: '8080'
+      ctstate: NEW
+      syn: match
+      jump: ACCEPT
+
+  - name: Drop 9000/TCP
+    ansible.builtin.iptables:
+      chain: INPUT
+      protocol: tcp
+      destination_port: '9000'
+      ctstate: NEW
+      syn: match
+      jump: DROP
+
+  - name: Install packages
+    remote_user: "{{ remote_user }}"
+    apt:
+      name: ['apt-transport-https', 'ca-certificates', 'curl', 'jq', 'software-properties-common', 'git', 'iptables', 'ansible', 'webhook', 'net-tools']
+      state: present
+      update_cache: yes
+
+  - name: Retrieve public IP
+    remote_user: "{{ remote_user }}"
+    command: curl ifconfig.me
+    register: pub_ip
+
+  - name: Add Caddy apt key
+    apt_key:
+      url: https://dl.cloudsmith.io/public/caddy/stable/gpg.key
+      id: 65760C51EDEA2017CEA2CA15155B6D79CA56EA34
+      state: present
+    register: add_repository_key
+    ignore_errors: true
+
+  - name: Add Caddy repository
+    apt_repository:
+      repo: deb https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main
+      state: present
+      update_cache: true
+
+  - name: Install Caddy
+    remote_user: "{{ remote_user }}"
+    apt:
+      name: ['caddy']
+      state: present
+      update_cache: yes
+
+  - name: Write caddy conf
+    become: yes
+    remote_user: "{{ remote_user }}"
+    shell: "printf 'http://{{ pub_ip.stdout }}:80 {\n
+      root * /var/www/conf\n
+      file_server\n
+      }\n
+      http://{{ pub_ip.stdout }}:8080 {\n
+      reverse_proxy http://localhost:9000\n
+      }' > /etc/caddy/Caddyfile"
+
+  - name: Add client conf path
+    become: yes
+    file:
+      path: "/var/www/conf"
+      state: directory
+
+  #- name: Fix caddy url
+  #  command: "sed -i 's/0.0.0.0/{{ pub_ip.stdout }}/g' /etc/caddy/Caddyfile"
+
+  - name: Restart Caddy
+    ansible.builtin.systemd:
+      state: restarted
+      daemon_reload: yes
+      name: caddy
+
+  - name: Clone anchor tooling
+    become_user: "{{ remote_user }}"
+    ansible.builtin.git:
+      repo: https://github.com/yapishu/anchor-ansible.git
+      dest: "/home/{{ remote_user }}/anchor-ansible"
+
+  - name: Create systemd service
+    become: yes
+    get_url:
+      url: https://raw.githubusercontent.com/yapishu/anchor-ansible/master/listener.service
+      dest: /etc/systemd/system/listener.service
+
+  - name: Enable listener service
+    ansible.builtin.systemd:
+      state: started
+      enabled: yes
+      daemon_reload: yes
+      name: listener
+
+  - name: Copy SSH key
+    ansible.builtin.copy:
+      src: /home/reid/gits/anchor-ansible/key.pem
+      dest: "/home/{{ remote_user }}/anchor-ansible/key.pem"
+      mode: '0600'
+      owner: "{{ remote_user }}"
+      group: "{{ remote_user }}"
+
+  - name: Copy API key
+    ansible.builtin.copy:
+      src: /home/reid/gits/anchor-ansible/.api
+      dest: "/home/{{ remote_user }}/anchor-ansible/.api"
+      mode: '0600'
+      owner: "{{ remote_user }}"
+      group: "{{ remote_user }}"
+
+  - name: Print completion message
+    ansible.builtin.debug:
+      msg: Provisioning complete

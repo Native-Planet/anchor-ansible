@@ -1,0 +1,10 @@
+[Unit]
+Description=Webhook for VPS provisioning
+
+[Service]
+ExecStart=/usr/bin/webhook -hooks /home/ubuntu/anchor-ansible/hook.json -ip 0.0.0.0 -verbose
+user=ubuntu
+group=ubuntu
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,234 @@
+---
+- hosts: vpnnode
+  become: yes
+  environment:
+    PUBKEY: "{{ PUBKEY }}"
+  gather_facts: true
+  tasks:
+
+  - meta: end_play
+    when: PUBKEY|length == 0
+
+  - name: Get remote non-root user
+    set_fact:
+      remote_user: "{{ ansible_env.SUDO_USER or ansible_user_id }}"
+
+  - name: Get local non-root user
+    set_fact:
+      local_user: "{{ ansible_env.SUDO_USER or ansible_user_id }}"
+    delegate_to: localhost
+
+  - name: Install docker packages
+    remote_user: "{{ remote_user }}"
+    apt:
+      name: ['apt-transport-https', 'ca-certificates', 'curl', 'software-properties-common', 'git', 'iptables', 'resolvconf', 'linux-headers-generic', 'wireguard']
+      state: present
+      update_cache: yes
+    tags:
+      - docker
+
+  - name: Add Docker PGP
+    remote_user: "{{ remote_user }}"
+    apt_key:
+      url: https://download.docker.com/linux/ubuntu/gpg
+      state: present
+    tags:
+      - docker
+
+  - name: Verify fingerprint
+    remote_user: "{{ remote_user }}"
+    apt_key:
+      id: 0EBFCD88
+      state: present
+    tags:
+      - docker
+  
+  - name: Stable repo
+    remote_user: "{{ remote_user }}"
+    apt_repository:
+      repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu xenial stable
+      state: present
+      update_cache: yes
+    tags:
+      - docker
+
+  - name: Update apt
+    remote_user: "{{ remote_user }}"
+    apt:
+      update_cache: yes
+    tags:
+      - docker
+
+  - name: Install docker
+    remote_user: "{{ remote_user }}"
+    apt:
+      name: docker-ce
+      state: present
+      update_cache: yes
+    tags:
+      - docker
+
+  - name: Add remote user to "docker" group
+    remote_user: "{{ remote_user }}"
+    user:
+      name: "{{ remote_user }}"
+      groups: "docker"
+      append: yes
+    tags:
+      - docker
+
+  - name: Install docker-compose
+    remote_user: "{{ remote_user }}"
+    get_url: 
+      url : https://github.com/docker/compose/releases/download/1.25.1-rc1/docker-compose-Linux-x86_64
+      dest: /usr/local/bin/docker-compose
+      mode: 'u+x,g+x'
+
+  - debug: msg="{{ansible_env}}"
+
+  - name: Reboot
+    reboot:
+
+  - name: Remove git dir if exists
+    file: 
+      path: "/home/{{ remote_user}}/anchor-server" 
+      state: absent
+
+  - name: Clone anchor git
+    remote_user: "{{ remote_user }}"
+    git:
+      repo: https://github.com/yapishu/home-urbit-anchor-server.git
+      dest: "/home/{{ remote_user}}/anchor-server"
+      version: feat/mvp
+
+  - name: Add mount path
+    file:
+      path: "/home/{{ remote_user }}/wg"
+      state: directory
+
+  - name: Add controller save path
+    remote_user: "{{ local_user }}"
+    become: yes
+    file:
+      path: "{{ lookup('env','HOME') }}/servers"
+      group: "{{ local_user }}"
+      owner: "{{ local_user }}"
+      state: directory
+      recurse: yes
+    delegate_to: localhost
+
+  - name: Add client conf path
+    remote_user: "{{ local_user }}"
+    become: yes
+    file:
+      path: "/var/www/conf"
+      state: directory
+    delegate_to: localhost
+
+  # - name: Replace home dir
+  #   replace:
+  #     path: "/home/{{ remote_user }}/anchor-server/docker-compose.yaml"
+  #     regexp: '${HOME}'
+  #     replace: "/home/{{ remote_user }}"
+
+  # - name: Replace pubkey
+  #   replace:
+  #     path: "/home/{{ remote_user }}/anchor-server/docker-compose.yaml"
+  #     regexp: '${PUBKEY}'
+  #     replace: "{{ PUBKEY }}"
+
+  - debug: msg="{{ansible_env}}"
+
+  - name: Execute image
+    command: docker-compose up -d
+    become: yes
+    args:
+      chdir: "/home/{{ remote_user}}/anchor-server"
+
+  - name: Check for pubkey from container
+    wait_for:
+      path: "/root/wg/wg_pub"
+
+  - name: Print server pubkey
+    remote_user: "{{ remote_user }}"
+    command: cat wg_pub
+    register: serverpub
+    args:
+      chdir: "/root/wg"
+
+  - debug: msg="{{ serverpub.stdout }}"
+
+  - name: Retrieve public IP
+    remote_user: "{{ remote_user }}"
+    command: curl ifconfig.me
+    register: pub_ip
+
+  - name: Print server pubkey to file
+    remote_user: "{{ local_user }}"
+    become: no
+    copy:
+      content: "{{ serverpub.stdout }}"
+      dest: "{{ lookup('env','HOME') }}/servers/{{ pub_ip.stdout }}"
+    delegate_to: localhost
+
+  - name: Write user conf
+    remote_user: "{{ remote_user }}"
+    shell: printf '[Interface]\n
+      PrivateKey = privkey\n
+      Address = 10.13.13.2\n
+      DNS = 1.1.1.1\n
+      \n
+      [Peer]\n
+      PublicKey = {{ serverpub.stdout }}\n
+      AllowedIPs = 0.0.0.0/0\n
+      Endpoint = {{ pub_ip.stdout }}:51820\n
+      PersistentKeepalive = 15' > "/home/{{ remote_user }}/wg/client.conf"
+  
+  - name: Fetch client conf
+    remote_user: "{{ remote_user }}"
+    fetch:
+      src: "/home/{{ remote_user }}/wg/client.conf"
+      dest: "/home/{{ local_user }}/servers/{{ pub_ip.stdout }}.conf"
+      mode: 0664
+      flat: true
+
+  - name: Remove leading spaces from client conf
+    remote_user: "{{ local_user }}"
+    become: no
+    ansible.builtin.replace:
+      path: "/home/{{ local_user }}/servers/{{ pub_ip.stdout }}.conf"
+      regexp: '^[ \t]*'
+      replace: ''
+    delegate_to: localhost
+
+  - name: B64 client pubkey
+    remote_user: "{{ local_user }}"
+    become: no
+    delegate_to: localhost
+    shell: "echo {{ PUBKEY }} | base64"
+    register: b64clientpub
+
+  - name: B64 client conf
+    remote_user: "{{ local_user }}"
+    become: no
+    delegate_to: localhost
+    shell: "cat /home/{{ local_user }}/servers/{{ pub_ip.stdout }}.conf | base64"
+    register: b64clientconf
+
+  - debug: msg="Client conf {{ b64clientconf.stdout }}"
+
+  - name: Create single-line B64 conf
+    remote_user: "{{ local_user }}"
+    become: yes
+    delegate_to: localhost
+    shell: "echo \"{{ b64clientconf.stdout }}\" | tr -d '\n' > {{ b64clientpub.stdout }}"
+    args:
+      chdir: "/var/www/conf"
+
+  - debug: msg="Client pubkey {{ PUBKEY }}"
+
+  - debug: msg="Client conf {{ b64clientconf.stdout }}"
+
+  - debug: msg="Config file {{ b64clientpub.stdout }}"
+
+  - debug: msg="Configuration available at https://anchor-ansible.nativeplanet.io/{{ b64clientpub.stdout }}"
