@@ -8,6 +8,7 @@ These Ansible scripts will
 
 ### TODO: 
 
-- Webhook trigger for incoming requests
-- Automated VPS provisioning
-- Account tracking & cleanup
+- ✔️ Webhook trigger for incoming requests
+- ✔️ Automated VPS provisioning
+- [API] Account tracking & cleanup
+- Move shell script actions to API
