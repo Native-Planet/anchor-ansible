@@ -1,0 +1,15 @@
+[
+    {
+        "id": "provision",
+        "execute-command": "/home/ubuntu/anchor-ansible/anchor-hook.sh",
+        "command-working-directory": "/home/ubuntu/anchor-ansible",
+        "response-message": "200",
+        "pass-arguments-to-command":
+        [
+            {
+                "source": "entire-payload",
+                "name": "pubkey"
+            }
+        ]
+    }
+]
